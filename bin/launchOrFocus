@@ -1,0 +1,233 @@
+#!/bin/bash
+# Launches the requested app or focuses its window.  App name ~= window class.
+# Rotates through active windows if multiple are found.
+#
+# Note that you may use 'xwininfo' to get e.g. the class of your application's
+# window.
+
+if [ $# -eq 0 ] || [[ $1 = "-h" || $1 = "--help" ]]; then
+    echo "Usage: launchOrFocus [-s] [-n name] [-c class] app app_args"
+	echo "  -s: Separate workspaces.  Specifically, don't look for windows in "
+	echo "      other workspaces when determining whether or not to launch a "
+	echo "      new instance."
+	echo "  -n: Search for existing windows by title containing \"name\""
+	echo "  -c: Search for existing windows by class containing \"class\"."
+    echo "      This is the default."
+	echo "  app: The command to execute"
+	echo "  app_args: Any arguments to pass to app"
+	echo ""
+	echo "Notes:"
+	echo "Default (non -s operation) is to look for any active windows in any "
+	echo "workspace available, but if at least one is found on the current "
+	echo "workspace, cycle between windows on the current workspace only."
+	echo ""
+    echo "If you are using this script with launchers, it is suggested that "
+	echo "you add an alternate launcher which executes the command without "
+	echo "this script if you need to be able to create more than one window "
+	echo "for an application."
+	exit
+fi
+
+xdotool help > /dev/null
+if [ $? -ne 0 ]; then
+    echo "Requires xdotool.  Use sudo apt-get install xdotool (or equivalent)."
+	exit
+fi
+
+use_zenity=
+zenity -h > /dev/null
+if [ $? -eq 0 ]; then
+    echo "Using zenity"
+    use_zenity=true
+else
+    echo "If you want nicer functionality, sudo apt-get install zenity"
+fi
+
+any_workspace=true # Old default used to be false
+criteria="--class"
+criteria_arg=
+while [ 1 -eq 1 ]; do
+    if [[ $1 = "-s" || $1 = "--separate-workspaces" ]]; then
+        any_workspace=
+        shift
+    elif [[ $1 = "-n" || $1 = "--name" ]]; then
+        criteria="--name"
+        shift
+        criteria_arg="$1"
+        shift
+    elif [[ $1 = "-c" || $1 = "--class" ]]; then
+        criteria="--class"
+        shift
+        criteria_arg="$1"
+        shift
+	elif [[ $1 == -* ]]; then
+		echo "Unrecognized argument: $1"
+		exit
+    else
+        break
+    fi
+done
+
+app=$1
+shift
+
+if [ -z "$criteria_arg" ]; then
+    criteria_arg="`basename $app`"
+elif [[ "$criteria_arg" = "none" ]]; then
+    criteria_arg=
+fi
+
+# Get our list of windows, in backwards order.  In other words, when a window
+# gets focus, it moves to the end of this list.
+windows=`xdotool search --maxdepth 3 $criteria "$criteria_arg"`
+curwin=`xdotool getactivewindow`
+if [[ $windows =~ $curwin ]]; then
+    # We are one of the currently active windows.  We don't flip the list
+    # since we're cycling from live, and we want to use zenity if it is
+    # available.
+    cur_active=yes
+else
+    # We are not currently active; flip our list to activate the
+    # most recently used rather than the least recently.
+    # Also disable zenity - no gui required
+    cur_active=
+    use_zenity=
+fi
+    
+if [ -z $any_workspace ]; then
+    # If any_workspace isn't set, we'll try to find a window on our desktop
+    echo "Finding on current workspace..."
+    desktop=`xdotool get_desktop`
+    oldwindows=$windows
+    windows=
+    for win in $oldwindows; do
+        if [ `xdotool get_desktop_for_window $win` -eq $desktop ]; then
+            windows="$windows $win"
+        fi
+    done
+
+    if [ $use_zenity ]; then
+        # Flip the list so most recent shows first
+        new_windows=
+        for win in $windows; do
+            new_windows="$win $new_windows"
+        done
+        windows="$new_windows"
+    fi
+else
+    # If any_workspace is set, any window will work
+    echo "Finding on any workspace (preferably ours)..."
+    # If there are windows in our workspace, use only those
+    desktop=`xdotool get_desktop`
+    my_windows=
+    for win in $windows; do
+        if [ `xdotool get_desktop_for_window $win` -eq $desktop ]; then
+            my_windows="$my_windows $win"
+        fi
+    done
+    if [ "$my_windows" ] && [ -z $use_zenity ]; then
+        # If we have windows on our workspace, and we're not using zenity, 
+        # we only want to flip through windows on our workspace.
+        windows="$my_windows"
+    elif [ "$my_windows" ]; then
+        # Using zenity
+        # We want these windows at the top of the list, but we also want to
+        # flip the list so that the most active window shows at the top of
+        # the list.
+        other_windows=
+        for win in $windows; do
+            if [[ ! "$my_windows" =~ $win ]]; then
+                other_windows="$other_windows $win"
+            fi
+        done
+        windows="$other_windows $my_windows"
+        new_windows=
+        for win in $windows; do
+            new_windows="$win $new_windows"
+        done
+        windows="$new_windows"
+    fi
+fi
+
+if [ -z $cur_active ]; then
+    # Flip the list to activate the most recently used
+    oldwindows=$windows
+    windows=
+    for win in $oldwindows; do
+        windows="$win $windows"
+    done
+fi
+
+switched=false
+if [ "$windows" ]; then
+    # If we have an active window, we want to cycle instances on this 
+    # desktop.
+    if [ $use_zenity ]; then
+        # Show a dialog and activate on that
+        # Use an array and xargs ugliness - seems to be only way.
+        window_list=()
+        for win in $windows; do
+            id=$win
+            # Ensure it's desktop level
+            desktop=`xdotool get_desktop_for_window $id`
+            if [ $? -eq 0 ]; then
+                name=`xdotool getwindowname $id`
+                if [ $? -eq 0 ]; then
+                    window_list[${#window_list[@]}]="$id"
+                    window_list[${#window_list[@]}]="$desktop"
+                    window_list[${#window_list[@]}]="\"$name\""
+                fi
+            fi
+        done
+        window_list[${#window_list[@]}]="newWindow"
+        window_list[${#window_list[@]}]="\"\""
+        window_list[${#window_list[@]}]="\"(New Window)\""
+        window_sel=`echo "${window_list[@]}" | xargs zenity --list \
+            --title="Select Window" --width=640 --height=480 \
+            --column="ID" --column="Desktop" --column="Title" \
+            --hide-column=1 \
+            `
+
+        if [ $? -ne 0 ] || [ -z "$window_sel" ]; then
+            # User canceled
+            switched=true
+        elif [ "$window_sel" != "newWindow" ]; then
+            switched=true
+            xdotool windowactivate "$window_sel"
+        fi
+
+    else
+        # Cycle through windows
+        live=0
+        while [ $live -lt 3 ]; do
+            for win in $windows; do
+                if [ $live -gt 0 ]; then
+                    # We've already come across our active window, so switch
+                    # to the next one.
+                    xdotool windowactivate $win
+                    if [ $? -eq 0 ]; then
+                        # Sometimes, still isn't active
+                        sleep 0.01
+                        if [ $win -eq `xdotool getactivewindow` ]; then
+                            echo "Switched to $win"
+                            switched=true
+                            exit
+                        fi
+                    fi
+                fi
+                if [ $live -eq 0 ] && [ $win -eq $curwin ]; then
+                    live=1
+                fi
+            done
+            # Advance try count; if we aren't live, this is still ok, means we
+            # will pick first window.
+            (( live += 1 ))
+        done
+    fi
+fi
+
+if [ $switched = "false" ]; then
+    $app $*
+    echo "Launched new instance"
+fi
+
